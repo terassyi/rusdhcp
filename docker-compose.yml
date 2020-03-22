@@ -4,7 +4,7 @@ services:
         container_name: rusdhcp
         build: .
         tty: true
-        
+        privileged: true
         volumes:
             - ./:/usr/local/rusdhcp
 

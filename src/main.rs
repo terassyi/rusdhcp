@@ -11,6 +11,8 @@ mod server;
 mod client;
 mod storage;
 
+use server::{DHCPServer, Config};
+
 fn main() {
     let app = App::new("rusdhcp")
         .version("0.0.1")
@@ -18,9 +20,12 @@ fn main() {
         .help("DHCP Server/Client")
         .subcommand(SubCommand::with_name("server")
         .about("server use")
-        .arg(Arg::with_name("pool")
+        .arg(Arg::with_name("path")
             .short("p")
-            .long("pool")
+            .long("path")
+            .value_name("config")
+            .help("Sets the path to config file")
+            .takes_value(true)
             )
         )
         .subcommand(SubCommand::with_name("client")
@@ -28,8 +33,11 @@ fn main() {
         );
         let matches = app.get_matches();
         match matches.subcommand_matches("server") {
-            Some(_) => {
+            Some(s) => {
                 println!("server use");
+                if let Some(path) = s.value_of("path") {
+                    server::serve(path);
+                }
             },
             None => {}
         }

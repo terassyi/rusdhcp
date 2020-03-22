@@ -1,7 +1,6 @@
 extern crate pnet;
 extern crate byteorder;
-
-#[macro_use]
+extern crate failure;
 
 use std::vec::Vec;
 // use std::iter::Map;
@@ -9,11 +8,12 @@ use std::net::Ipv4Addr;
 use pnet::util::MacAddr;
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::Cursor;
-// use failure;
 
 const MAJIC_COOKIE_OFFSET: usize = 236;
 const MAJIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
+const HTYPE_ETHER: u8 = 1;
 
+#[derive(Debug)]
 pub struct DHCPPacket {
     pub op: DHCPOperationCode,
     pub htype: u8,
@@ -30,13 +30,13 @@ pub struct DHCPPacket {
     pub options: Vec<Options>
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum DHCPOperationCode {
     Request = 1,
     Reply = 2
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum BFlag {
     Unicast = 0,
     Broadcast = 1
@@ -72,13 +72,23 @@ pub enum MessageType {
     DHCPRELEAS = 7
 }
 
+#[derive(Debug)]
+pub enum OptionParseError {
+    // #[fail(display = "decode failed")]
+    ParseError,
+    // #[fail(display = "unsupported option")]
+    UnsupportError
+}
+
+
+
 impl DHCPPacket {
-    pub fn new(buf: &[u8]) -> Option<DHCPPacket> {
+    pub fn new(buf: &[u8]) -> Result<DHCPPacket, failure::Error> {
         let op: DHCPOperationCode = match buf[0] {
             1 => DHCPOperationCode::Request,
             2 => DHCPOperationCode::Reply,
             _ => {
-                return None
+                return Err(failure::format_err!("invalid operation code"));
             }
         };
         let flag: BFlag = match buf[10] {
@@ -99,17 +109,17 @@ impl DHCPPacket {
             giaddr: Ipv4Addr::new(buf[24], buf[25], buf[26], buf[27]),
             chaddr: MacAddr::new(buf[28], buf[29], buf[30], buf[31], buf[32], buf[33]),
             options: match decode_options(&buf[(MAJIC_COOKIE_OFFSET + 4)..]) {
-                Some(options) => options,
-                None => return None
+                Ok(options) => options,
+                Err(e) => return Err(failure::format_err!("failed to decode options: {:?}", e)),
             },
         };
         // should compare majic cookie.
-        Some(packet)
+        Ok(packet)
     }
 
     pub fn decode(&self) -> Option<Vec<u8>> {
         let mut data = vec![0u8; self.len()];
-        println!("length of buffer: {}", self.len());
+        debug!("length of buffer: {}", self.len());
         data[0] = match self.op {
             DHCPOperationCode::Request => 1,
             DHCPOperationCode::Reply => 2
@@ -142,7 +152,6 @@ impl DHCPPacket {
                 Some(o) => o,
                 None => return None
             };
-            // println!("offset:{} l:{}  opl:{} ol:{} o:{:?} op: {:?}", offset, offset + l, op.len() + 2, o.len(), o, op);
             data[offset..(offset + l)].clone_from_slice(&o);
             offset += l;
         }
@@ -154,19 +163,58 @@ impl DHCPPacket {
     fn len(&self) -> usize {
         34 + 202 + 4 + 1 + self.options.iter().fold(0, |sum, op| sum + 2 + op.len())
     }
+
+    pub fn operation(&self) -> DHCPOperationCode {
+        self.op
+    }
+
+    pub fn get_options(&self) -> &[Options] {
+        &self.options
+    }
+
+    pub fn create_reply_packet(xid: u32, 
+        yiaddr: Ipv4Addr,
+        giaddr: Ipv4Addr,
+        ciaddr: Option<Ipv4Addr>,
+        flag: BFlag,
+        chaddr: MacAddr,
+        options: Vec<Options>
+    ) -> Result<DHCPPacket, failure::Error> {
+
+        let reply = DHCPPacket {
+            op: DHCPOperationCode::Reply,
+            htype: HTYPE_ETHER,
+            hlen: 6 as u8,
+            hops: 0 as u8,
+            xid: xid,
+            secs: 0 as u16,
+            flags: flag,
+            ciaddr: if let Some(ciaddr) = ciaddr {
+                ciaddr
+            } else {
+                Ipv4Addr::new(0, 0, 0, 0)
+            },
+            yiaddr: yiaddr,
+            siaddr: Ipv4Addr::new(0, 0, 0, 0),
+            giaddr: giaddr,
+            chaddr: chaddr,
+            options: options,
+        };
+        Ok(reply)
+    }    
 }
 
 impl Options {
-    fn new(code: u8, len: u8, data: &[u8]) -> Option<Options> {
+    pub fn new(code: u8, len: u8, data: &[u8]) -> Result<Options, OptionParseError> {
         match code {
-            SUBNET_MASK => Some(Options::SubnetMask(Ipv4Addr::new(data[0], data[1], data[2], data[3]))),
+            SUBNET_MASK => Ok(Options::SubnetMask(Ipv4Addr::new(data[0], data[1], data[2], data[3]))),
             ROUTER_OPTION => {
                 let mut addresses: Vec<Ipv4Addr> = Vec::new();
                 for i in 0..(len / 4) {
                     let b = &data[(i as usize)..((i as usize) + 4)];
                     addresses.push(Ipv4Addr::new(b[0], b[1], b[2], b[3]))
                 }
-                Some(Options::RouterOption(addresses))
+                Ok(Options::RouterOption(addresses))
             },
             DOMAIN_NAME_SERVER_OPTION => {
                 let mut addresses: Vec<Ipv4Addr> = Vec::new();
@@ -174,33 +222,34 @@ impl Options {
                     let b = &data[(i as usize)..((i as usize) + 4)];
                     addresses.push(Ipv4Addr::new(b[0], b[1], b[2], b[3]))
                 }
-                Some(Options::DNSOption(addresses))
+                Ok(Options::DNSOption(addresses))
             },
-            DEFAULT_IP_TOL => Some(Options::IPTol(data[0])),
-            REQUESTED_IPADDRESS => Some(Options::RequestedIPAddress(Ipv4Addr::new(data[0], data[1], data[2], data[3]))),
-            IP_ADDRESS_LEASE_TIME => Some(Options::LeaseTime(Cursor::new(data.to_vec()).read_u32::<BigEndian>().unwrap())),
+            DEFAULT_IP_TOL => Ok(Options::IPTol(data[0])),
+            REQUESTED_IPADDRESS => Ok(Options::RequestedIPAddress(Ipv4Addr::new(data[0], data[1], data[2], data[3]))),
+            IP_ADDRESS_LEASE_TIME => Ok(Options::LeaseTime(Cursor::new(data.to_vec()).read_u32::<BigEndian>().unwrap())),
             DHCP_MESSAGE_TYPE => {
                 match data[0] {
-                    1 => Some(Options::DHCPMessageType(MessageType::DHCPDISCOVER)),
-                    2 => Some(Options::DHCPMessageType(MessageType::DHCPOFFER)),
-                    3 => Some(Options::DHCPMessageType(MessageType::DHCPREQUEST)),
-                    4 => Some(Options::DHCPMessageType(MessageType::DHCPDECLINE)),
-                    5 => Some(Options::DHCPMessageType(MessageType::DHCPACK)),
-                    6 => Some(Options::DHCPMessageType(MessageType::DHCPNAK)),
-                    7 => Some(Options::DHCPMessageType(MessageType::DHCPRELEAS)),
-                    _ => None,
+                    1 => Ok(Options::DHCPMessageType(MessageType::DHCPDISCOVER)),
+                    2 => Ok(Options::DHCPMessageType(MessageType::DHCPOFFER)),
+                    3 => Ok(Options::DHCPMessageType(MessageType::DHCPREQUEST)),
+                    4 => Ok(Options::DHCPMessageType(MessageType::DHCPDECLINE)),
+                    5 => Ok(Options::DHCPMessageType(MessageType::DHCPACK)),
+                    6 => Ok(Options::DHCPMessageType(MessageType::DHCPNAK)),
+                    7 => Ok(Options::DHCPMessageType(MessageType::DHCPRELEAS)),
+                    _ => Err(OptionParseError::UnsupportError),
                 }
             },
-            SERVER_IDENTIFIER => Some(Options::ServerIdentifier(Ipv4Addr::new(data[0], data[1], data[2], data[3]))),
+            SERVER_IDENTIFIER => Ok(Options::ServerIdentifier(Ipv4Addr::new(data[0], data[1], data[2], data[3]))),
             MESSAGE => {
                 match String::from_utf8(data.to_vec()) {
-                    Ok(message) => Some(Options::Message(message)),
-                    Err(_) => None,
+                    Ok(message) => Ok(Options::Message(message)),
+                    Err(_) => Err(OptionParseError::ParseError),
                 }                
             },
             _ => {
                 // debug!("unhandled dhcp options");
-                None
+                // println!("code:{}, data:{:?}", code, data);
+                Err(OptionParseError::UnsupportError)
             }
         }
     }
@@ -275,28 +324,49 @@ impl Options {
     }
 }
 
+pub fn is_requested_address<'a >(options: &'a Vec<Options>) -> Option<&'a Ipv4Addr> {
+    if let Some(op) = options.iter().find(|op| match op {
+        Options::RequestedIPAddress(_) => true,
+        _ => false
+    }) {
+        match op {
+            Options::RequestedIPAddress(addr) => Some(addr),
+            _ => None
+        }
+
+    } else {
+        None
+    }
+}
+
 // fn encode_options(options: Vec<Options>) -> Option<&[u8]> {
 //     let length = options.iter().fold(0, |l, op| l + op.len() + 2);
 //     let options = options.iter().map(|option| option.decode().unwrap() );
 //     options.fold()
 // }
 
-fn decode_options(data: &[u8]) -> Option<Vec<Options>>  {
+fn decode_options(data: &[u8]) -> Result<Vec<Options>, failure::Error> {
     let mut options: Vec<Options> = Vec::new();
     let mut code_offset = 0;
     let mut length_offset = 1;
     while data[code_offset] != END {
         let length = data[length_offset];
         match Options::new(data[code_offset], length, &data[(length_offset + 1)..(length_offset + 1 + (length as usize))]) {
-            Some(op) => {
+            Ok(op) => {
                 options.push(op);
                 code_offset += (length + 2) as usize;
                 length_offset += (length + 2) as usize;
             },
-            None => return None
+            Err(e) => match e {
+                OptionParseError::ParseError => return Err(failure::format_err!("failed to parse option")),
+                OptionParseError::UnsupportError => {
+                    code_offset += (length + 2) as usize;
+                    length_offset += (length + 2) as usize;
+                } // println!("unsupported options found"),
+            }
         }
     }
-    Some(options)
+    Ok(options)
 }
 
 fn macaddr_to_slice(addr: MacAddr) -> [u8; 6] {
@@ -413,6 +483,7 @@ mod tests {
             0x03, 0x04, 0xc0, 0xa8, 0x00, 0x01, // router option 192.168.0.1
             0x06, 0x04, 0x08, 0x08, 0x08, 0x08, // dns option 8.8.8.8
             0x32, 0x04, 0xc0, 0xa8, 0x00, 0x05, // requested ip 192.168.0.5
+            0x3d, 0x06, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, // client identifier
             0xff, // end
         ];
         let packet = super::DHCPPacket::new(&data).unwrap();
@@ -474,5 +545,13 @@ mod tests {
         assert_eq!(packet.len(), data.len());
         println!("pass length test");
         assert_eq!(packet.decode().unwrap(), data.to_vec());
+    }
+
+    #[test]
+    fn test_get_options() {
+        let discover = super::Options::new(53, 1, &[1]).unwrap();
+        let request = super::Options::new(50, 4, &[192,168,0,5]).unwrap();
+        let options = vec![discover, request];
+        assert_eq!(&super::Ipv4Addr::new(192,168, 0, 5), super::is_requested_address(&options).unwrap());
     }
 }
