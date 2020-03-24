@@ -49,19 +49,19 @@ impl DHCPServer {
 }
 
 impl DHCPServer {
-    fn handle(&self, socket: UdpSocket, packet: &DHCPPacket) -> Result<(), failure::Error> {
+    fn handle(&self, socket: &UdpSocket, packet: &DHCPPacket) -> Result<(), failure::Error> {
         let options = packet.get_options();
         // let message_type = &options[0];
         match &options[0] {
             Options::DHCPMessageType(typ) => {
                 match typ {
-                    MessageType::DHCPDISCOVER => self.dhcp_discover_handle(&socket, packet)?,
+                    MessageType::DHCPDISCOVER => self.dhcp_discover_handle(socket, packet)?,
                     // MessageType::DHCPOFFER => 
-                    MessageType::DHCPREQUEST => self.dhcp_request_handle(&socket, packet)?,
+                    MessageType::DHCPREQUEST => self.dhcp_request_handle(socket, packet)?,
                     // MessageType::DHCPDECLINE =>
                     // MessageType::DHCPACK =>
                     // MessageType::DHCPNAK =>
-                    MessageType::DHCPRELEAS => self.dhcp_request_handle_release(&socket, packet)?,
+                    MessageType::DHCPRELEAS => self.dhcp_request_handle_release(socket, packet)?,
                     _ => return Err(failure::format_err!("Unhandlable message type"))
                 }
             },
@@ -84,11 +84,12 @@ impl DHCPServer {
             None,
             packet.flags,
             packet.chaddr,
-            self.create_options(1)
+            self.create_options(2)
         )?;
+        println!("-------- reply packet DHCPOFFER ----------");
+        println!("{:?}", packet);
         let buf = reply.decode().expect("failed to decode reply packet");
         // broadcast
-        println!("reach here");
         broadcast(socket, &buf)?;
         Ok(())
     }
@@ -145,6 +146,8 @@ impl DHCPServer {
             packet.chaddr,
             options
         )?;
+        println!("-------- reply packet DHCPACK ----------");
+        println!("{:?}", reply);
         let buf = reply.decode().expect("failed to decode reply packet");
         broadcast(socket, &buf)?;
         Ok(())
@@ -305,7 +308,7 @@ pub fn serve(path: &str) {
                             if packet.operation() == DHCPOperationCode::Reply {
                                 return
                             }
-                            match server.handle(socket, &packet) {
+                            match server.handle(&socket, &packet) {
                                 Ok(_) => {},
                                 Err(e) => println!("handling error: {:?}", e),
                             }
@@ -323,8 +326,6 @@ pub fn serve(path: &str) {
 
 fn broadcast(socket: &UdpSocket, buf: &[u8]) -> Result<(), failure::Error> {
     let destination: SocketAddr = "255.255.255.255:68".parse()?;
-    println!("sockaddr: {:?}", destination);
-    println!("socket: {:?}", socket);
     socket.send_to(buf, destination)?;
     Ok(())
 }
